@@ -1,0 +1,233 @@
+---
+title: A tutorial for DiffusionDefinition.jl
+author: Frank van der Meulen
+date: April 2020
+---
+
+## rand function that needs to be added for simulating directly a trajectory of a diffusion
+```julia
+import Base.rand
+function rand(P, x0, tt)
+	(dp,dw) = DD.dimension(P)
+	W = rand(tt, DD.Wiener(), zero(DD.ℝ{dw}))
+	X = trajectory(tt, DD.ℝ{dp})
+	DD.solve!(X, W, P, x0)
+    X
+end
+
+rand(P,x0,tt,n) = [rand(P,x0,tt) for _ in 1:n]
+```
+
+
+
+## Defining a diffusion process for a swinging pendulum
+
+In this tutorial we will define a diffusion and simulate trajectories from it.
+To this end, we adapt an example from this
+[tutorial for DifferentialEquations.jl](https://docs.sciml.ai/latest/tutorials/ode_example/).
+The differential equation for the angular position of a single pendulum is given by the second
+order ordinary differential equation
+```math
+ \frac{\mathrm{d}^2\, x(t)}{\mathrm{d}\, t^2} + \theta^2 \sin(x(t)) =0.
+```
+Here $x(t)$ gives the angular position at time $t$ and $\theta$ is  the angular velocity of the linearised pendulum.
+Under the assumption that the acceleration is in fact a white-noise process, we obtain the
+Stochastic Differential Equation (SDE)
+```math
+ \begin{align}
+ \mathrm{d}\, X_t &=\begin{bmatrix} 0 & 1 \\ 0 & 0 \end{bmatrix} X_t \mathrm{d}\,
+ t + \begin{bmatrix} 0 \\ -\theta^2 \sin(X_{1t})\end{bmatrix} \mathrm{d}\, t+
+  \begin{bmatrix} 0 \\ \gamma \end{bmatrix} \mathrm{d}\, W_t, \end{align}
+```
+where $X_t=\begin{bmatrix} X_{t1} & X_{t2}\end{bmatrix}^\prime$.
+
+
+To define the diffusion for the pendulum, we use the `DiffusionDefinition.jl`-package. @#
+```julia
+using Plots, DiffusionDefinition, StaticArrays, Bridge
+const DD = DiffusionDefinition
+gr()
+```
+
+To define the diffusion, we specify the dimensions of the state space and Wiener noise and
+the parameters appearing in the SDE
+```julia
+@diffusion_process Pendulum begin
+    :dimensions
+    process --> 2
+    wiener --> 1
+
+    :parameters
+    (θ, γ) --> (2, Float64)
+end
+```
+Suppose $θ=2$ and $\gamma=0.5$, then we can define an instance of the `struct` called `Pendulum` by setting
+```julia
+P = Pendulum(2.0, 0.5)
+```
+We eed a good print method for P, displaying as how it is defined. It should display
+- dimensions
+- parameters (with names)
+- additional stuff
+
+Something like this should be defined using `Base.show`, I don't know exactly how.
+```julia
+"""
+Good display of variable of type State
+"""
+function Base.show(io::IO, P::Pendulum)
+  show(io,  "text/plain", typeof(P))
+  show(io, "\n")
+  show(io, DD.dimension(P))
+  show(io, fieldnames(typeof(P)))
+end
+
+
+```
+
+
+The general form in which the diffusion is specified uses the notation
+```math
+ \mathrm{d}\, X_t = b(t,X_t)\mathrm{d}\,t + \sigma(t,X_t) \mathrm{d}\,W_t
+```
+and hence we need to specify the drift $b$ and diffusivity $\sigma$
+```julia
+DD.b(t, x, P::Pendulum) = @SVector [x[2],-P.θ^2 * sin(x[1])]
+DD.σ(t, x, P::Pendulum) = @SMatrix [0.0 ; P.γ]
+```
+Now we can sample a trajectory of the diffusion. For that, we first sample a Wiener process on a fine grid:
+```julia
+tt = collect(0.0:0.005:8.0)
+#(dp,dw) = DD.dimension(P)
+#W = rand(tt, DD.Wiener(), zero(DD.ℝ{dw}))
+#plot(W.t, first.(W.x), label="W")
+```
+The wiener path can then be used in an Euler-Maruyama scheme to compute a trajectory under a given diffusion law:
+```julia
+#X = trajectory(tt, DD.ℝ{dp})  # allocate a trajectory
+x0 = @SVector [1.0, 0.0]  # starting point
+#DD.solve!(X, W, P, x0)
+```
+So that's it. We can plot the simulated trajectories
+```julia
+X = rand(P, x0, tt)
+pl = plot(X.t, first.(X.x))
+plot!(pl, X.t, last.(X.x))
+pl
+```
+
+## Adding additional information
+
+If all there is to it to simulate a path of the diffusion, then the struct `P` we have defined
+does the job. However, suppose we consider a statistical problem where we observed the process
+only at observation times $t_0<t_1<\cdots <t_n$ and we wish to interpolate, i.e. *smooth* the paths, and
+estimate parameters (in this case $\theta$ and $\gamma$). Then it turns out to be useful to provide some additional
+information to the diffusion, which enhances computational efficiency. In this case, the diffusivity $\sigma$ does not depend on
+time or state: it is constant. This can be specified as follows:
+```julia
+@diffusion_process Pendulum2 begin
+    :dimensions
+    process --> 2
+    wiener --> 1
+
+    :parameters
+    (θ, γ) --> (2, Float64)
+
+    :additional
+    constdiff --> true
+end
+```
+Then we can set
+```julia
+P2 = Pendulum2(1.0, 0.5)
+```
+
+
+## Providing the observation scheme
+
+Let's assume we observe
+```math
+ V_i = L X_{t_i} + N(0,\Sigma) \qquad \text{where} \quad L=\begin{bmatrix} 1 & 0 \end{bmatrix}
+```
+We first extract a subset of the data to make $V_i$. In practise of course, the sequence $\{V_i\}$ is what is given, these are the data.
+```julia
+ind = 1:10:length(tt)
+Σ = SDiagonal(1e-4)
+L = @SMatrix [1.0 0.0]
+v = [L*X.x[i] for i in ind]
+tobs = tt[ind];
+```
+Using the package `DiffObservScheme` we can specify a `recording`, which is named tuple that
+precisely specifies the diffusion, the data, and a prior over the startingpoint (or, if the starting point is observed
+    without error, an indicator that will pass this information).
+```julia
+using DiffObservScheme
+obs = [LinearGsnObs(tobs[i], v[i]; L = L, Σ = Σ) for i in eachindex(v)]
+μ, Σ = 0.0, 5.0
+x0_prior = GsnStartingPt(μ, Σ)
+
+recording = (
+        P = P,
+        obs = [LinearGsnObs(tobs[i], v[i]; L = L, Σ = Σ) for i in eachindex(v)],
+        t0 = tobs[1],
+        x0_prior = x0_prior,
+);
+```
+
+```julia
+all_obs = AllObservations()
+add_recording!(all_obs, recording);
+```
+
+
+
+Question: is it preferable to use staticarrays, or does everything work with default arrays as well; I suppose it does.
+In that case, for a tutorial, it may be better to initiallly avoid staticarrays (to make it as simple as possible)
+
+
+## A second example: the Brusselator
+
+```julia
+using DiffusionDefinition
+@diffusion_process Brusselator begin
+    :dimensions
+    process --> 2
+    wiener --> 2
+
+    :parameters
+    (α, β, γ1, γ2) --> (4, Float64)
+
+	:additional
+    constdiff --> true
+end
+```
+
+```julia
+DD.b(t, x, P::Brusselator) = @SVector [
+    1.0 - (P.β+1.0)*x[1] + P.α * x[1]^2 * x[2],
+    P.β*x[1] - P.α * x[1]^2 * x[2] ]
+DD.σ(t, x, P::Brusselator) = SDiagonal(P.γ1, P.γ2)
+P_Brus = Brusselator(1.0, 1.0, 0.1, 0.1)
+```
+
+```julia
+X = rand(P_Brus, x0, tt)
+pl = plot(X.t, first.(X.x))
+plot!(pl, X.t, last.(X.x))
+pl
+```
+
+
+## Choosing a predefined diffusion process
+
+Many diffusions have been predefined. To assess a list of predefined diffusions, issue the command:
+```julia
+@load_diffusion
+```
+
+To choose one from this list
+```julia
+@load_diffusion DD.FitzHughNagumo
+```
+So ok, now it is loaded, but is unclear how to use it.
+`?FitzHughNagumo` does not give anything
