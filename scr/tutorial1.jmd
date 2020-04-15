@@ -6,16 +6,16 @@ date: April 2020
 
 ## rand function that needs to be added for simulating directly a trajectory of a diffusion
 ```julia
-import Base.rand
-function rand(P, x0, tt)
-	(dp,dw) = DD.dimension(P)
-	W = rand(tt, DD.Wiener(), zero(DD.ℝ{dw}))
-	X = trajectory(tt, DD.ℝ{dp})
-	DD.solve!(X, W, P, x0)
-    X
-end
-
-rand(P,x0,tt,n) = [rand(P,x0,tt) for _ in 1:n]
+# import Base.rand
+# function rand(P, x0, tt)
+# 	(dp,dw) = DD.dimension(P)
+# 	W = rand(tt, DD.Wiener(), zero(DD.ℝ{dw}))
+# 	X = trajectory(tt, DD.ℝ{dp})
+# 	DD.solve!(X, W, P, x0)
+#     X
+# end
+#
+# rand(P,x0,tt,n) = [rand(P,x0,tt) for _ in 1:n]
 ```
 
 
@@ -75,10 +75,10 @@ Something like this should be defined using `Base.show`, I don't know exactly ho
 """
 Good display of variable of type State
 """
-function Base.show(io::IO, P::Pendulum)
+function Base.show(io::IO, P::DD.DiffusionProcess)
   show(io,  "text/plain", typeof(P))
   show(io, "\n")
-  show(io, DD.dimension(P))
+  show(io, dimension(P))
   show(io, fieldnames(typeof(P)))
 end
 
