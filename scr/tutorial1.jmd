@@ -200,7 +200,7 @@ However, we can simulate a process which "interpolates" the observations and is 
 *guided proposals*. To define these, we first define an auxiliary process, which is assumed to satisfy a linear SDE.
 That is, we assume the auxiliary process $\tilde{X}$ to satisfy the SDE
 ```math
- \tilde{X}_t = ()\tilde{B}(t)\tilde{X}_t + \tilde\beta(t) ) \mathrm{d}\,
+ \tilde{X}_t = (\tilde{B}(t)\tilde{X}_t + \tilde\beta(t) ) \mathrm{d}\,
 t + \tilde\sigma \mathrm{d}\,
 W_t.
 ```
@@ -211,4 +211,49 @@ forward process towards the conditionings implied by the observations. Here, we 
  \mathrm{d}\, \tilde{X}_t &=\begin{bmatrix} 0 & 1 \\ 0 & 0 \end{bmatrix} \tilde{X}_t \mathrm{d}\,
  t +
   \begin{bmatrix} 0 \\ \gamma \end{bmatrix} \mathrm{d}\, W_t, \end{align}
+```
+We need to define this process, just as we defined the struct for the pendulum process.
+```julia
+using GuidedProposals
+@diffusion_process PendulumAux{R} begin
+    :dimensions
+    process --> 2
+    wiener --> 1
+
+    :parameters
+    γ --> Float64
+
+	:auxiliary_info
+	t0 --> Float64
+	T --> Float64
+	vT --> R
+
+	:additional
+	constdiff --> true
+	linear --> true
+end
+DD.B(t, P::PendulumAux) = @SMatrix [0.0 1.0; 0.0 0.0]
+DD.β(t, P::PendulumAux) = @SVector [0.0, 0.0]
+DD.σ(t, P::PendulumAux) = @SMatrix [0.0 ; P.γ]
+```
+
+```julia
+
+dt = 0.01
+tts = [0.0:dt:(obs[1].t)]
+for i in 2:length(obs)
+	push!(tts, obs[i-1].t:dt:obs[i].t)
+end
+GuidedProposals.build_guid_prop(PendulumAux, recording, tts)
+build_guid_prop(PendulumAux, recording, tts)
+```
+
+
+```julia
+WW° = map(tt->trajectory(tt, DD.ℝ{1}), tts)
+XX° = deepcopy(WW°)
+Wnr = [DD.Wiener() for _=1:1]
+x0 = rand(recording.x0_prior)
+success, ll° = forward_guide!(WW°, XX°, Wnr, P, x0)
+success_single, ll_single° = forward_guide!(WW°[1], XX°[1], Wnr[1], P[1], x0) # on one segment
 ```
