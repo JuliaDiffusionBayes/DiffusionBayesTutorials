@@ -1,0 +1,214 @@
+---
+title: A tutorial for DiffusionDefinition.jl
+author: Frank van der Meulen
+date: April 2020
+---
+
+## Defining a diffusion process for a swinging pendulum
+
+In this tutorial we will define a diffusion and simulate trajectories from it.
+We start with the differential equation for the angular position of a swinging pendulum, which is given by the second
+order ordinary differential equation
+```math
+ \frac{\mathrm{d}^2\, x(t)}{\mathrm{d}\, t^2} + \theta^2 \sin(x(t)) = 0.
+```
+Here $x(t)$ gives the angular position at time $t$ and $\theta$ is  the angular velocity of the linearised pendulum.
+Under the assumption that the acceleration is in fact a white-noise process, we obtain the
+Stochastic Differential Equation (SDE)
+```math
+ \begin{align}
+ \mathrm{d}\, X_t &=\begin{bmatrix} 0 & 1 \\ 0 & 0 \end{bmatrix} X_t \mathrm{d}\,
+ t + \begin{bmatrix} 0 \\ -\theta^2 \sin(X_{1t})\end{bmatrix} \mathrm{d}\, t+
+  \begin{bmatrix} 0 \\ \gamma \end{bmatrix} \mathrm{d}\, W_t, \end{align}
+```
+where $X_t=\begin{bmatrix} X_{t1} & X_{t2}\end{bmatrix}^\prime$.
+
+
+To define the diffusion for the pendulum, we use the `DiffusionDefinition.jl`-package.
+```julia
+using Plots, DiffusionDefinition, StaticArrays, Bridge
+```
+To avoid typing `DiffusionDefinition` fully, we define
+```julia
+const DD = DiffusionDefinition;
+```
+To define the diffusion, we specify the dimensions of the state space and Wiener noise and
+the parameters appearing in the SDE using the `diffusion_process`-macro. In the call to this macro we specify the
+dimensions of the state space of the diffusion and driving Wiener process, as also parameters appearing in their definition.
+```julia
+@diffusion_process Pendulum begin
+    :dimensions
+    process --> 2
+    wiener --> 1
+
+    :parameters
+    (θ, γ) --> (2, Float64)
+end
+```
+Note the printed message and that by issuing the command `?Pendulum` information on the constructed `struct` is displayed.
+Suppose $θ=2$ and $\gamma=0.5$, then we can define an instance of the `struct` called `Pendulum` by setting
+```julia
+P = Pendulum(2.0, 0.5)
+```
+There are various convenience functions, among which
+```julia
+DD.parameters(P)
+DD.parameter_names(P)
+```
+The general form in which the diffusion is specified uses the notation
+```math
+ \mathrm{d}\, X_t = b(t,X_t)\mathrm{d}\,t + \sigma(t,X_t) \mathrm{d}\,W_t
+```
+So the drift is denoted by $b$ and the diffusivity by $\sigma$ (this is the notation in the well known books by Rogers and Williams on stochastic calculus).
+As the functions $b$ and $\sigma$ are are not exported in the `DiffusionDefinition`-package (to avoid conflicts with other packages), these need to
+be defined using `DiffusionDefinition.b` and `DiffusionDefinition.σ`.
+```julia
+DD.b(t, x, P::Pendulum) = @SVector [x[2],-P.θ^2 * sin(x[1])]
+DD.σ(t, x, P::Pendulum) = @SMatrix [0.0 ; P.γ]
+```
+While not strictly necessary, it is preferable to use static vectors and matrices using commands from the `StaticArrays`-package.
+Now we can sample a trajectory of the diffusion. For that, we need a starting point and grid (on which the solution to the SDE is approximated using Euler discretisation).
+```julia
+tt = collect(0.0:0.005:8.0)  # grid
+x0 = @SVector [1.0, 0.0]  # starting point
+X = DD.rand(P, x0, tt);
+```
+Now `X` is a trajectory, with `X.t` denoting the timegrid, and `X.x` the simulated trajectory.
+next, we  plot the simulated trajectories
+```julia
+using PyPlot
+pyplot()
+pl = Plots.plot(X.t, first.(X.x))
+Plots.plot!(pl, X.t, last.(X.x))
+pl
+```
+
+## Adding additional information
+
+If all there is to it to simulate a path of the diffusion, then the struct `P` we have defined
+does the job. However, suppose we consider a statistical problem where we observed the process
+only at observation times $t_0<t_1<\cdots <t_n$ and we wish to interpolate, i.e. *smooth* the paths, and
+estimate parameters (in this case $\theta$ and $\gamma$). Then it turns out to be useful to provide some additional
+information to the diffusion, which enhances computational efficiency. In this case, the diffusivity $\sigma$ does not depend on
+time or state: it is constant. This can be specified as follows:
+```julia
+@diffusion_process Pendulum begin
+    :dimensions
+    process --> 2
+    wiener --> 1
+
+    :parameters
+    (θ, γ) --> (2, Float64)
+
+    :additional
+    constdiff --> true
+end
+```
+Then we can set
+```julia
+P2 = Pendulum(1.0, 0.5)
+```
+
+
+## Providing the observation scheme
+
+Let's assume we observe
+```math
+ V_i = L X_{t_i} + N(0,\Sigma) \qquad \text{where} \quad L=\begin{bmatrix} 1 & 0 \end{bmatrix}
+```
+We first extract a subset of the data to make $V_i$. In practise of course, the sequence $\{V_i\}$ is what is given, these are the data.
+```julia
+ind = 1:10:length(tt)
+Σ = SDiagonal(1e-4)
+L = @SMatrix [1.0 0.0]
+v = [L*X.x[i] for i in ind]
+tobs = tt[ind];
+```
+Using the package `DiffObservScheme` we can specify a `recording`, which is named tuple that
+precisely specifies the diffusion, the data, and a prior over the startingpoint (or, if the starting point is observed
+    without error, an indicator that will pass this information).
+```julia
+using DiffObservScheme
+obs = [LinearGsnObs(tobs[i], v[i]; L = L, Σ = Σ) for i in eachindex(v)]
+μ, Σ = 0.0, 5.0
+x0_prior = GsnStartingPt(μ, Σ)
+
+recording = (
+        P = P,
+        obs = [LinearGsnObs(tobs[i], v[i]; L = L, Σ = Σ) for i in eachindex(v)],
+        t0 = tobs[1],
+        x0_prior = x0_prior,
+);
+```
+
+```julia
+all_obs = AllObservations()
+add_recording!(all_obs, recording);
+```
+
+
+
+## A second example: the Brusselator
+
+```julia
+@diffusion_process Brusselator begin
+    :dimensions
+    process --> 2
+    wiener --> 2
+
+    :parameters
+    (α, β, γ1, γ2) --> (4, Float64)
+
+	:additional
+    constdiff --> true
+end
+```
+
+```julia
+DD.b(t, x, P::Brusselator) = @SVector [
+    1.0 - (P.β+1.0)*x[1] + P.α * x[1]^2 * x[2],
+    P.β*x[1] - P.α * x[1]^2 * x[2] ]
+DD.σ(t, x, P::Brusselator) = SDiagonal(P.γ1, P.γ2)
+P_Brus = Brusselator(1.0, 1.0, 0.1, 0.1)
+```
+
+```julia
+X = DD.rand(P_Brus, x0, tt)
+pl = Plots.plot(X.t, first.(X.x))
+Plots.plot!(pl, X.t, last.(X.x))
+pl
+```
+
+
+## Choosing a predefined diffusion process
+
+Many diffusions have been predefined. To assess a list of predefined diffusions, issue the command:
+```julia
+@load_diffusion
+```
+
+To choose one from this list
+```julia
+@load_diffusion DD.FavettoSamson
+```
+
+## Definining and simulating guided proposals for the swinging pendulum
+
+A key ingredient for inference of discretely observed diffusion processes is data-augmentation. Here, for a fixed parameter (assumed known for the moment),
+we simulate the diffusion process, conditioned on the discrete time observations. Only in very simple cases, exact draws of this conditioned process can be simulated.
+However, we can simulate a process which "interpolates" the observations and is close to the true conditioned process (hopefully). This is one of the main ideas behind
+*guided proposals*. To define these, we first define an auxiliary process, which is assumed to satisfy a linear SDE.
+That is, we assume the auxiliary process $\tilde{X}$ to satisfy the SDE
+```math
+ \tilde{X}_t = ()\tilde{B}(t)\tilde{X}_t + \tilde\beta(t) ) \mathrm{d}\,
+t + \tilde\sigma \mathrm{d}\,
+W_t.
+```
+This process is hence simple and is designed to guide the
+forward process towards the conditionings implied by the observations. Here, we define the auxiliary process $\tilde{X}$ by simplyl dropping the nonlinear $\sin$-term in the drift of the diffusion.
+```math
+ \begin{align}
+ \mathrm{d}\, \tilde{X}_t &=\begin{bmatrix} 0 & 1 \\ 0 & 0 \end{bmatrix} \tilde{X}_t \mathrm{d}\,
+ t +
+  \begin{bmatrix} 0 \\ \gamma \end{bmatrix} \mathrm{d}\, W_t, \end{align}
+```
